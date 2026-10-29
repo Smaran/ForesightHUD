@@ -4231,6 +4231,7 @@ function FHUD_peek_joker_badges()
         if k == 'j_vagabond' then ev = true end
       end
       mk = mk and cfg('card_makers') and #hl > 0 and not dead
+      local any8 = e8 -- an 8 Ball plays whether or not its badge is on (Vagabond's "?")
       e8 = e8 and cfg('eightball')
       ev = ev and cfg('vagabond')
       local hg = (mk or e8 or ev) and FHUD_peek_hand_gen(false, true) or nil
@@ -4269,7 +4270,7 @@ function FHUD_peek_joker_badges()
         local vag_key = {}
         for _, cr in ipairs((hg and hg.creates) or {}) do if cr.who == 'vag' and cr.joker then vag_key[cr.joker] = cr.key end end
         -- nothing selected: another joker (8 Ball, Superposition...) may still take the room first
-        local unsure = (#hl == 0 and hg and (hg.unknown_other or e8)) or (hg and hg.tooth)
+        local unsure = (#hl == 0 and hg and (hg.unknown_other or any8)) or (hg and hg.tooth)
         for _, sl in ipairs(slots('j_vagabond')) do
           if dead or (hg and hg.hand_dead) then badge(sl.j, "no roll", 'muted')
           elseif vag_key[sl.j] then
@@ -4373,10 +4374,11 @@ function FHUD_peek_joker_badges()
       res.blind_gen = bg
       if bg then
         local per = {}
-        local function add(j, txt, card)
+        local function add(j, txt, card, cert)
           per[j] = per[j] or { txt = {}, cards = {} }
           per[j].txt[#per[j].txt + 1] = txt
           per[j].cards[#per[j].cards + 1] = card
+          if cert then per[j].cert = true end
         end
         if want.j_riff_raff then
           for _, r in ipairs(bg.riff) do if r.joker then add(r.joker, "+" .. short_name(r.key), { key = r.key, edkey = r.edkey }) end end
@@ -4390,16 +4392,19 @@ function FHUD_peek_joker_badges()
             if r.joker and r.front then
               local f = r.front
               local nm = (RS[f.value] or tostring(f.value)) .. " " .. loc_or(f.suit, 'suits_plural')
-              add(r.joker, "+" .. nm .. (r.seal and (" " .. r.seal) or ""), { front = f, seal = r.seal })
+              add(r.joker, "+" .. nm .. (r.seal and (" " .. r.seal) or ""), { front = f, seal = r.seal }, true)
             end
           end
         end
+        -- v0.8.1 final: `or per[j]` -- a Blueprint whose right neighbour is sliced (Madness / Dagger)
+        -- copies the joker after it at the first draw, e.g. a Certificate: it makes a card even
+        -- though it copies something else right now
         for i, j in ipairs(jl) do
           local k = ckey(eff[i])
-          if want[k or ''] then
+          if want[k or ''] or per[j] then
             local p = per[j]
             if p then
-              badge(j, table.concat(p.txt, " ") .. (bg.cert_uncertain and k == 'j_certificate' and "?" or ""), 'good', p.cards)
+              badge(j, table.concat(p.txt, " ") .. ((bg.cert_uncertain and p.cert) and "?" or ""), 'good', p.cards)
             elseif bg.full_slots and bg.full_slots[j] then
               badge(j, "no room", 'muted')
             elseif bg.sliced and bg.sliced[j] then
