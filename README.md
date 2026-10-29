@@ -12,7 +12,11 @@ It's built for single-player manual play: plan around the dice instead of guessi
 > byte for byte. If the check ever fails, all predictions switch themselves off for the
 > session rather than risk your run.
 
-<!-- SCREENSHOTS: add images here once hosted (e.g. GitHub), as ![caption](https://...) -->
+<!-- SCREENSHOTS: images must use absolute URLs (Thunderstore can't resolve relative paths):
+     ![caption](https://raw.githubusercontent.com/Smaran/ForesightHUD/main/screenshots/<file>.png)
+     build.py fails if a linked file is missing from screenshots/. -->
+<!--SHOTS-->
+<!--/SHOTS-->
 
 ## Features
 
