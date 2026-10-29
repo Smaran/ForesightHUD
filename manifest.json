@@ -1,7 +1,7 @@
 {
   "name": "ForesightHUD",
   "version_number": "1.0.0",
-  "website_url": "",
+  "website_url": "https://github.com/Smaran/ForesightHUD",
   "description": "See what Balatro's RNG will do: next rerolls, pack contents, consumable results, bosses, skip-tag rewards, and what every random joker rolls. Exact dry runs that never change your run.",
   "dependencies": [
     "Steamodded-Steamodded-26.1002.0"
