@@ -1,0 +1,17 @@
+{
+  "id": "ForesightHUD",
+  "name": "Foresight HUD",
+  "author": [
+    "ohhtthatguy"
+  ],
+  "description": "In-game foresight overlay for manual play. Upcoming draws; the next shop reroll and the reroll chain (R, with each reroll's price) exactly as the real reroll makes them; booster-pack contents on hover (incl. Buffoon-pack stickers and Standard-pack seals); consumable predictions (Wheel of Fortune, The Emperor, High Priestess, Judgement, The Soul, The Fool, Aura, and the Spectrals Wraith, Hex, Ectoplasm, Ankh, Immolate, Sigil, Ouija, Familiar, Grim, Incantation); joker generators (8 Ball and Vagabond from your selected hand, Hallucination on pack hover, Riff-raff, Cartomancer and Certificate at blind select); hand tags under your cards (which Glass cards break, what each Lucky card rolls, the Tarot each Purple seal makes if discarded, the Planet each held Blue seal makes); a blind-select strip (the bosses of the next antes, what a Director's Cut / Retcon reroll gives, what each skip tag actually gives you, next ante's tags when they are certain, and the boss chain you get if you buy Hieroglyph / Petroglyph); and joker badges showing what each random joker will do (Space Joker level-up, every Business Card / Bloodstone / Reserved Parking roll of the selected hand, Lucky Cat's gain, Misprint's Mult, Gros Michel / Cavendish extinction, To Do List / Ancient Joker's next pick, Madness's victim, what Invisible Joker and Perkeo copy, and the card Superposition / Seance / Sixth Sense make). Previews never change your run, your collection or the game's random state, and never run while the game is paused. Per-feature toggles in Config.",
+  "prefix": "fhud",
+  "main_file": "ForesightHUD.lua",
+  "config_file": "config.lua",
+  "priority": 100,
+  "badge_colour": "8E44AD",
+  "version": "0.8.1",
+  "dependencies": [
+    "Steamodded (>=1.0.0)"
+  ]
+}
