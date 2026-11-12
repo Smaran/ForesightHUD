@@ -7,6 +7,8 @@ joker roll, drawn with real card sprites and short labels.
 
 It's built for single-player manual play: plan around the dice instead of guessing.
 
+**Download:** [Thunderstore](https://thunderstore.io/c/balatro/p/ohhtthatguy/ForesightHUD/) (install with r2modman or Gale), or the zip from this repo's releases.
+
 > Previews **never change your run**. Every dry run snapshots the game's random state (and
 > everything else a generator touches), restores it afterwards, and checks the restore
 > byte for byte. If the check ever fails, all predictions switch themselves off for the
