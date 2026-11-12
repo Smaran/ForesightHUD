@@ -16,6 +16,17 @@ It's built for single-player manual play: plan around the dice instead of guessi
      ![caption](https://raw.githubusercontent.com/Smaran/ForesightHUD/main/screenshots/<file>.png)
      build.py fails if a linked file is missing from screenshots/. -->
 <!--SHOTS-->
+![Next reroll beside the shop](https://raw.githubusercontent.com/Smaran/ForesightHUD/main/screenshots/01_Next-reroll-beside-the-shop.jpg)
+
+![Pack contents and Hallucination on hover](https://raw.githubusercontent.com/Smaran/ForesightHUD/main/screenshots/02_Pack-contents-and-Hallucination-on-hover.jpg)
+
+![Reroll window press R next 10 rerolls with prices](https://raw.githubusercontent.com/Smaran/ForesightHUD/main/screenshots/03_Reroll-window-press-R-next-10-rerolls-with-prices.jpg)
+
+![Hand tags joker badges and score preview](https://raw.githubusercontent.com/Smaran/ForesightHUD/main/screenshots/04_Hand-tags-joker-badges-and-score-preview.jpg)
+
+![Wheel of Fortune preview](https://raw.githubusercontent.com/Smaran/ForesightHUD/main/screenshots/05_Wheel-of-Fortune-preview.jpg)
+
+![Blind select bosses skip tags and joker badges](https://raw.githubusercontent.com/Smaran/ForesightHUD/main/screenshots/06_Blind-select-bosses-skip-tags-and-joker-badges.jpg)
 <!--/SHOTS-->
 
 ## Features
@@ -24,7 +35,7 @@ All features are on by default. Each one has its own toggle in **Mods → Foresi
 
 ### Shop and draws
 - **Upcoming draws**: the next 5 cards you'll draw, in draw order, above the deck.
-- **Next reroll**: the cards the next shop reroll gives, above the shop. It follows the real
+- **Next reroll**: the cards the next shop reroll gives, beside the shop. It follows the real
   reroll exactly, including cards freed from the current shop, Illusion and edition tags.
 - **Reroll chain (press `R` in the shop)**: a window with the next 10 rerolls and the price of
   each. Hover any joker in it to read its description.
@@ -43,6 +54,9 @@ Immolate, Sigil, Ouija, Familiar, Grim and Incantation.
 - **Lucky**: every roll of each Lucky card, retriggers included.
 - **Purple seal**: the Tarot it makes if you discard it.
 - **Blue seal**: the Planet it makes at the end of the round.
+- **Score preview**: the exact score of the selected cards (every joker, enhancement, edition,
+  seal and the boss blind, Lucky and Glass rolls included) and whether it beats the blind.
+  Turns itself off if you run DVPreview, so you never get two score boxes.
 
 ### Blind select
 - **Upcoming bosses** for the next antes, plus what a Director's Cut or Retcon reroll gives.

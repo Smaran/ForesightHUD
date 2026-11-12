@@ -27,6 +27,7 @@ return {
   glass = true,
   purple_seal = true,
   blue_seal = true,
+  score_preview = true, -- selected hand's exact score (auto-off when DVPreview is installed)
   -- blind select (Wave 4)
   boss_preview = true,
   skip_tags = true,

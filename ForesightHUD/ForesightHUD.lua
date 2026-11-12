@@ -48,7 +48,7 @@ local MOD = (SMODS and SMODS.current_mod) or nil
 local CONFIG_DEFAULTS = {
   -- live
   upcoming_draws = true, reroll_preview = true, pack_hover = true,
-  auto_highlight = true, reroll_chain = true,
+  auto_highlight = true, reroll_chain = true, score_preview = true,
   wheel = true, lucky = true, emperor = true, high_priestess = true,
   judgement = true, soul = true, fool = true, aura = true, spectrals = true,
   eightball = true, hallucination = true, riffraff = true, cartomancer = true,
@@ -66,6 +66,31 @@ if MOD then MOD.config = FHUD.config end
 
 -- feature flag read: missing/true => on, explicit false => off.
 local function cfg(k) return FHUD.config[k] ~= false end
+
+-- Touch support (iOS/Android, or FHUD_FORCE_MOBILE=1 for PC testing). On touch screens the
+-- engine only "hovers" while a finger is down, so a tap would flash a preview for one frame.
+-- FHUD_hover_target() keeps the last touched node as the hover target for a few seconds.
+-- On desktop it is exactly G.CONTROLLER.hovering.target (behaviour unchanged).
+do
+  local okos, os_name = pcall(function() return love.system.getOS() end)
+  FHUD_IS_MOBILE = (okos and (os_name == 'iOS' or os_name == 'Android')) or (os.getenv and os.getenv("FHUD_FORCE_MOBILE") ~= nil) or false
+end
+FHUD.touch_hold = FHUD.touch_hold or 4
+function FHUD_hover_target()
+  local C = G and G.CONTROLLER
+  if not C then return nil end
+  local t = C.hovering and C.hovering.target
+  if not FHUD_IS_MOBILE then return t end
+  local now = love.timer.getTime()
+  if t and t ~= G.ROOM then
+    FHUD.touch_last, FHUD.touch_t = t, now
+    return t
+  end
+  local l = FHUD.touch_last
+  if l and not l.REMOVED and now - (FHUD.touch_t or 0) < FHUD.touch_hold then return l end
+  FHUD.touch_last = nil
+  return t
+end
 
 -- v0.7.1: while the game is PAUSED, pseudoseed returns math.random() instead of advancing
 -- the seeded stream (dump misc_functions.lua 330: `if G.SETTINGS.paused and key ~= 'to_do'
@@ -178,6 +203,30 @@ local function place_above(area, anchor, gap)
   area.T.y = anchor.T.y - area.T.h - (gap or 0.4)
 end
 
+-- v0.8.2: in the shop, "above the shop's joker row" is YOUR joker row, so previews sat on
+-- top of the jokers you own. Hover previews (pack, consumable) now sit OVER the shop's own
+-- row instead (you are hovering something else, the shop row is not what you look at).
+local function place_over(area, anchor)
+  if not (area and anchor and anchor.T) then return end
+  area.T.x = anchor.T.x + anchor.T.w / 2 - area.T.w / 2
+  area.T.y = anchor.T.y + anchor.T.h / 2 - area.T.h / 2
+end
+
+-- The always-on next-reroll preview goes in the free space right of the shop panel, level
+-- with the shop's joker row; if it does not fit there, over the shop row like the others.
+local function place_shop_side(area)
+  local shop = G.shop and (G.shop.VT or G.shop.T)
+  local row = G.shop_jokers and G.shop_jokers.T
+  if not (area and shop and row and G.ROOM and G.ROOM.T) then return place_over(area, G.shop_jokers) end
+  local x = shop.x + shop.w + 0.15
+  -- the screen is wider than G.ROOM (room starts at G.ROOM.T.x), so measure to the real edge
+  local right = G.ROOM.T.w
+  pcall(function() right = love.graphics.getWidth() / (G.TILESCALE * G.TILESIZE) - G.ROOM.T.x end)
+  if x + area.T.w > right - 0.1 then return place_over(area, G.shop_jokers) end
+  area.T.x = x
+  area.T.y = row.y + row.h / 2 - area.T.h / 2
+end
+
 ------------------------------------------------------------- UI components
 -- Reusable render primitives so every feature looks the same and there is one
 -- place to change the look. PRESERVES the Wave 0 appearance exactly.
@@ -188,7 +237,8 @@ FHUD.ui = FHUD.ui or {}
 function FHUD.ui.popover_area(copies, anchor, scale, gap)
   local area = new_area(math.max(#(copies or {}), 1), (scale or 0.7) * G.CARD_W)
   for _, cp in ipairs(copies or {}) do disable_input(cp); area:emplace(cp) end
-  place_above(area, anchor or G.shop_jokers or G.hand, gap or 0.8)
+  anchor = anchor or G.shop_jokers or G.hand
+  if anchor == G.shop_jokers and G.STATE == G.STATES.SHOP then place_over(area, anchor) else place_above(area, anchor, gap or 0.8) end
   if area.align_cards then area:align_cards() end
   return area
 end
@@ -519,15 +569,25 @@ local function center_key(c) return c and c.config and c.config.center and c.con
 -- on a card that no longer exists), and Card set_ability / Card:remove only touch
 -- used_jokers when no overlay is open; a real reroll never happens under an overlay.
 -- Returns pcall's results; everything is put back even when fn fails.
+-- Controller locks too: Card:set_edition / set_seal (create_card rolls an edition) set
+-- G.CONTROLLER.locks.edition / .seal and queue the event that clears them -- the event we
+-- just muted. Left set, the lock blocks every click and hover in the shop for good.
 local function dry_env(fn)
   local em = G.E_MANAGER
   local own = em and rawget(em, 'add_event')
   local ov = G.OVERLAY_MENU
+  local locks = G.CONTROLLER and G.CONTROLLER.locks
+  local saved_locks = {}
+  if locks then for k, v in pairs(locks) do saved_locks[k] = v end end
   if em then em.add_event = function() end end
   G.OVERLAY_MENU = nil
   local ok, err = pcall(fn)
   G.OVERLAY_MENU = ov
   if em then em.add_event = own end
+  if locks then
+    for k in pairs(locks) do if saved_locks[k] == nil then locks[k] = nil end end
+    for k, v in pairs(saved_locks) do locks[k] = v end
+  end
   return ok, err
 end
 
@@ -827,19 +887,28 @@ function FHUD_chain_overlay()
   pcall(function() costs = FHUD_reroll_costs(n) end)
   local jm = G.GAME.shop.joker_max or 2
   local cw = scale * G.CARD_W
+  -- Cards go into the rows only AFTER the overlay exists (like the Collection screens).
+  -- Emplaced before, they keep the spot the row was created at (the bottom edge) while
+  -- the paused overlay lays the rows out, so the window showed empty rows.
+  local pending = {}
+  -- The window pauses the game, and while paused the engine only moves (moveable.lua 281)
+  -- and hovers (controller.lua 1146) nodes flagged created_on_pause. The rows and the
+  -- dry-run cards are made before the pause, so flag them, children included, or they
+  -- stay frozen where they were created (below the screen) with no tooltips.
+  local function mark_pause(node, seen)
+    seen = seen or {}
+    if type(node) ~= 'table' or seen[node] then return end
+    seen[node] = true
+    node.created_on_pause = true
+    for _, ch in pairs(node.children or {}) do
+      if type(ch) == 'table' and ch.T then mark_pause(ch, seen) end
+    end
+  end
   local function row_node(r)
     local area = CardArea(G.ROOM.T.x, G.ROOM.T.h, (jm + 0.6) * cw, scale * G.CARD_H * 1.15,
       { card_limit = jm, type = "title", highlight_limit = 0 })
-    for _, cp in ipairs(rows[r] or {}) do
-      area:emplace(cp)
-      -- Hover shows the card's normal tooltip so you can read a joker before rerolling.
-      -- Card:hover needs collide+hover and no no_ui; click/drag stay off (display only).
-      cp.no_ui = false
-      if cp.states then
-        if cp.states.collide then cp.states.collide.can = true end
-        if cp.states.hover then cp.states.hover.can = true end
-      end
-    end
+    mark_pause(area)
+    pending[#pending + 1] = { area = area, cards = rows[r] or {} }
     -- "3. $7": that reroll's price; greyed once your money can't reach it.
     local c = costs[r]
     local txt = r .. "." .. (c and ((c.cost == 0) and " free" or (" $" .. c.cost)) or "")
@@ -867,10 +936,77 @@ function FHUD_chain_overlay()
       { n = G.UIT.T, config = { text = "(a modded tag or shop weighting is active: not modelled)", scale = 0.3,
         colour = G.C.UI.TEXT_INACTIVE } } } }
   end
+  -- v0.8.2: auto-highlight lifts Rare/Legendary copies; padding keeps a lifted card in the
+  -- first row off the title.
+  contents[#contents + 1] = { n = G.UIT.R, config = { align = "cm", minh = 0.12 }, nodes = {} }
   contents[#contents + 1] = { n = G.UIT.R, config = { align = "cm", r = 0.1, colour = G.C.BLACK, padding = 0.1,
     emboss = 0.05 }, nodes = col_nodes }
   local def = create_UIBox_generic_options({ back_func = "exit_overlay_menu", contents = contents })
-  G.FUNCS.overlay_menu { definition = def }
+  -- Open it like every vanilla overlay: paused (also stops hold-R "restart run" under it).
+  -- overlay_menu sets G.OVERLAY_MENU = true and frame-locks input BEFORE building the
+  -- UIBox, so a build error would leave a phantom menu and dead input: undo all of it.
+  G.SETTINGS.paused = true
+  local ok, err = pcall(G.FUNCS.overlay_menu, { definition = def })
+  if ok then
+    for _, p in ipairs(pending) do
+      for _, cp in ipairs(p.cards) do
+        p.area:emplace(cp)
+        mark_pause(cp)
+        -- Hover shows the card's normal tooltip so you can read a joker before rerolling.
+        -- Card:hover needs collide+hover and no no_ui; click/drag stay off (display only).
+        cp.no_ui = false
+        if cp.states then
+          if cp.states.collide then cp.states.collide.can = true end
+          if cp.states.hover then cp.states.hover.can = true end
+        end
+      end
+      if p.area.align_cards then p.area:align_cards() end
+      for _, cp in ipairs(p.cards) do
+        if cp.hard_set_T then cp:hard_set_T(cp.T.x, cp.T.y, cp.T.w, cp.T.h) end
+      end
+    end
+  else
+    for _, p in ipairs(pending) do
+      for _, cp in ipairs(p.cards) do if cp.remove then pcall(cp.remove, cp) end end
+    end
+  end
+  if not ok then
+    if G.OVERLAY_MENU and type(G.OVERLAY_MENU) == 'table' and G.OVERLAY_MENU.remove then
+      pcall(function() G.OVERLAY_MENU:remove() end)
+    end
+    G.OVERLAY_MENU = nil
+    G.SETTINGS.paused = false
+    G.CONTROLLER.locks.frame, G.CONTROLLER.locks.frame_set = nil, nil
+    pcall(G.CONTROLLER.mod_cursor_context_layer, G.CONTROLLER, -1000)
+    FHUD.chain_open = false
+    print("[ForesightHUD] reroll window failed to open: " .. tostring(err))
+  end
+end
+
+-- Input watchdog. The engine frame-locks ALL input (hover, clicks, keys, even Esc) for
+-- ~0.1s whenever an overlay opens or closes and releases it from a queued event
+-- (engine/controller.lua 196-220). If that release is ever lost, the game looks alive but
+-- ignores everything. The lock is never meant to outlive 0.1s with no overlay open, so
+-- release it after 1s, and clear a phantom `G.OVERLAY_MENU = true` left by a failed build.
+function FHUD_input_watchdog()
+  local C = G and G.CONTROLLER
+  if not (C and C.locks) then return end
+  if G.OVERLAY_MENU == true then
+    G.OVERLAY_MENU = nil
+    G.SETTINGS.paused = false
+    print("[ForesightHUD] watchdog: cleared a phantom overlay menu")
+  end
+  local now = (G.TIMERS and G.TIMERS.UPTIME) or 0
+  if C.locks.frame and not G.OVERLAY_MENU and not C.locks.frame_set then
+    FHUD.frame_lock_t = FHUD.frame_lock_t or now
+    if now - FHUD.frame_lock_t > 1 then
+      C.locks.frame = nil
+      FHUD.frame_lock_t = nil
+      print("[ForesightHUD] watchdog: released a stuck input lock (state " .. tostring(G.STATE) .. ")")
+    end
+  else
+    FHUD.frame_lock_t = nil
+  end
 end
 
 function FHUD_shop_destroy()
@@ -885,7 +1021,7 @@ function FHUD_shop_refresh()
   if ok and cards then
     for _, cp in ipairs(cards) do disable_input(cp); FHUD.shoparea:emplace(cp) end
   end
-  place_above(FHUD.shoparea, G.shop_jokers, 0.8)
+  place_shop_side(FHUD.shoparea)
   if FHUD.shoparea.align_cards then FHUD.shoparea:align_cards() end
 end
 
@@ -1289,7 +1425,7 @@ end
 
 local function find_hover_in(area, pred)
   if not (area and area.cards) then return nil end
-  local tgt = G.CONTROLLER and G.CONTROLLER.hovering and G.CONTROLLER.hovering.target
+  local tgt = FHUD_hover_target()
   for _, c in ipairs(area.cards) do
     if (c == tgt or (c.states and c.states.hover and c.states.hover.is)) and pred(c) then return c end
   end
@@ -1902,7 +2038,7 @@ function FHUD_special_tick()
   -- Fixed indices, NOT ipairs: G.pack_cards / G.shop_jokers are nil most of the time
   -- and ipairs stops at the first nil, which silently skipped G.consumeables (< v0.4.0).
   local areas = { G.shop_jokers, G.pack_cards, G.consumeables }
-  local tgt = G.CONTROLLER and G.CONTROLLER.hovering and G.CONTROLLER.hovering.target
+  local tgt = FHUD_hover_target()
   for ai = 1, 3 do
     local area = areas[ai]
     if special then break end
@@ -2779,7 +2915,7 @@ function FHUD_peek_hand_tags()
         res.pr.lucky_money = G.GAME.pseudorandom['lucky_money']
       else
         -- nothing selected: the hovered Lucky card's NEXT rolls (pre-v0.6.0 banner logic)
-        local tgt = G.CONTROLLER and G.CONTROLLER.hovering and G.CONTROLLER.hovering.target
+        local tgt = FHUD_hover_target()
         local hov
         for _, c in ipairs(G.hand.cards) do
           if effect(c) == 'Lucky Card' and (c == tgt or (c.states and c.states.hover and c.states.hover.is)) then hov = c; break end
@@ -2951,7 +3087,7 @@ local function tag_sig()
     end
   end
   -- the hovered Lucky card matters only while nothing is selected
-  local tgt = G.CONTROLLER and G.CONTROLLER.hovering and G.CONTROLLER.hovering.target
+  local tgt = FHUD_hover_target()
   if tgt and tgt.area == G.hand and tgt.ability and tgt.ability.effect == 'Lucky Card' then
     t[#t + 1] = "hov" .. tostring(tgt.sort_id)
   end
@@ -4599,6 +4735,28 @@ function FHUD_badge_obstacles(W, H, font)
   if G.STATE == G.STATES.SELECTING_HAND and FHUD.hand_tag_items then
     for _, b in ipairs(FHUD_hand_tag_layout(W, H, font)) do out[#out + 1] = { b.x, b.y, b.w, b.h, "hand tag" } end
   end
+  -- v0.8.2: the "3/5" slot counts under the joker and consumable rows (CardArea's
+  -- area_uibox, second row = card_count, cardarea.lua 324-350): badges must not cover them.
+  if G.ROOM and G.TILESCALE and G.TILESIZE then
+    local s = G.TILESCALE * G.TILESIZE
+    local ox, oy = G.ROOM.T.x, G.ROOM.T.y
+    for _, a in ipairs({ G.jokers, G.consumeables }) do
+      pcall(function()
+        local ub = a and a.children and a.children.area_uibox
+        local row = ub and ub.UIRoot and ub.UIRoot.children and ub.UIRoot.children[2]
+        -- the row spans the whole area; only its pieces ("3", "/", "5" and two 0.1 spacers) are text
+        local x0, y0, x1, y1
+        for _, ch in ipairs((row and row.children) or {}) do
+          local T = ch.VT or ch.T
+          if T and T.w > 0 then
+            x0 = math.min(x0 or T.x, T.x); y0 = math.min(y0 or T.y, T.y)
+            x1 = math.max(x1 or (T.x + T.w), T.x + T.w); y1 = math.max(y1 or (T.y + T.h), T.y + T.h)
+          end
+        end
+        if x0 then out[#out + 1] = { (x0 + ox) * s, (y0 + oy) * s, (x1 - x0) * s, (y1 - y0) * s, "slot count" } end
+      end)
+    end
+  end
   if G.STATE == G.STATES.BLIND_SELECT and FHUD.strip_items then
     local cut = FHUD.strip_cut
     for _, b in ipairs(FHUD_blind_strip_layout(W, H, font)) do out[#out + 1] = { b.x, b.y, b.w, b.h, "strip" } end
@@ -4639,7 +4797,7 @@ function FHUD_joker_badge_layout(W, H, font, obstacles)
   obstacles = obstacles or FHUD_badge_obstacles(W, H, font)
   local pop
   pcall(function()
-    local tgt = G.CONTROLLER and G.CONTROLLER.hovering and G.CONTROLLER.hovering.target
+    local tgt = FHUD_hover_target()
     local hp = tgt and tgt.children and tgt.children.h_popup
     local T = hp and (hp.VT or hp.T)
     if T then pop = { (T.x + ox) * s, (T.y + oy) * s, T.w * s, T.h * s } end
@@ -4712,7 +4870,7 @@ local function recipe_copy(rc, scale)
 end
 
 function FHUD_badge_hover_tick()
-  local tgt = G.CONTROLLER and G.CONTROLLER.hovering and G.CONTROLLER.hovering.target
+  local tgt = FHUD_hover_target()
   local dragging = G.CONTROLLER and G.CONTROLLER.dragging and G.CONTROLLER.dragging.target
   local cards
   if tgt and not dragging and G.jokers and tgt.area == G.jokers and FHUD.joker_badge_items and predict_ok() then
@@ -4772,6 +4930,18 @@ end
 ----------------------------------------------------------------- tick
 function FHUD_tick()
   FHUD.overlay_items = {}
+
+  -- v0.8.2: G.TIMERS.REAL restarts from 0 when you go back to the main menu (and on a new
+  -- run). Every throttle/hold below compares against it, so a reset made "now - last"
+  -- negative for as long as the old session lasted: the orphan sweep stalled and display
+  -- copies stayed on screen. When the clock goes backwards, drop the stored times.
+  do
+    local now = (G and G.TIMERS and G.TIMERS.REAL) or 0
+    if now < (FHUD.last_real or 0) then
+      FHUD.sweep_t, FHUD.pulse_t, FHUD.con_hold, FHUD.pack_hold = nil, nil, nil, nil
+    end
+    FHUD.last_real = now
+  end
 
   -- Copies are created and emplaced in the same tick, so anything still unparented
   -- from earlier frames is a leak. Throttled; cheap either way.
@@ -4899,7 +5069,7 @@ function FHUD_tick()
     -- which booster pack is hovered?
     local hov = nil
     if cfg('pack_hover') then
-      local tgt = G.CONTROLLER and G.CONTROLLER.hovering and G.CONTROLLER.hovering.target
+      local tgt = FHUD_hover_target()
       if G.shop_booster and G.shop_booster.cards then
         for _, p in ipairs(G.shop_booster.cards) do
           if p == tgt or (p.states and p.states.hover and p.states.hover.is) then hov = p; break end
@@ -4954,6 +5124,11 @@ if not FHUD.hooked then
   function love.update(dt)
     if _u then _u(dt) end
     pcall(FHUD_tick)
+    if FHUD_score_tick then
+      local ok_s, e_s = pcall(FHUD_score_tick)
+      if not ok_s and not FHUD.score_tick_err then FHUD.score_tick_err = true; print("[ForesightHUD] score tick error: " .. tostring(e_s)) end
+    end
+    pcall(FHUD_input_watchdog)
     -- every dry-run in a tick restores what it snapshots; if one ever didn't, never let
     -- the muted discover/unlock outlive the tick (see disc_mute)
     if (FHUD.disc_depth or 0) > 0 or FHUD.disc_saved then pcall(FHUD_disc_unmute, true) end
@@ -5060,18 +5235,528 @@ if not FHUD.hooked then
   local _kp = love.keypressed
   function love.keypressed(key, scancode, isrepeat)
     if _kp then _kp(key, scancode, isrepeat) end
-    -- R toggles the reroll-chain modal overlay (shop only).
-    if key == 'r' and cfg('reroll_chain') and G and G.STATE and G.STATES and G.STATE == G.STATES.SHOP
-        and FHUD_rng_live() then
-      if FHUD.chain_open and G.OVERLAY_MENU then
-        FHUD.chain_open = false
-        G.FUNCS.exit_overlay_menu()
-      elseif not G.OVERLAY_MENU then
-        FHUD.chain_open = true
-        pcall(FHUD_chain_overlay)
-      end
+    -- R toggles the reroll-chain modal overlay (shop only). The overlay pauses the game,
+    -- so closing must not wait for live RNG; opening still does (it runs dry-runs).
+    if key == 'r' then FHUD_toggle_chain() end
+  end
+end
+
+function FHUD_toggle_chain()
+  if cfg('reroll_chain') and G and G.STATE and G.STATES and G.STATE == G.STATES.SHOP then
+    if FHUD.chain_open and G.OVERLAY_MENU then
+      FHUD.chain_open = false
+      G.FUNCS.exit_overlay_menu()
+    elseif not G.OVERLAY_MENU and FHUD_rng_live() then
+      FHUD.chain_open = true
+      local ok = pcall(FHUD_chain_overlay)
+      if not (ok and G.OVERLAY_MENU) then FHUD.chain_open = false end
     end
   end
+end
+
+-------------------------------------------------------- Touch: on-screen reroll-chain button
+-- Touch screens have no R key, so in the shop a small "NEXT 10" button toggles the same
+-- overlay. Mobile only; desktop never draws it or intercepts clicks.
+if FHUD_IS_MOBILE and not FHUD.touch_btn_hooked then
+  FHUD.touch_btn_hooked = true
+  local function btn_rect()
+    local W, H = love.graphics.getDimensions()
+    local w, h = math.floor(W * 0.085), math.floor(H * 0.065)
+    return W - w - math.floor(W * 0.012), math.floor(H * 0.64), w, h
+  end
+  local function btn_visible()
+    return cfg('reroll_chain') and G and G.STATES and G.STATE == G.STATES.SHOP
+      and (not G.OVERLAY_MENU or FHUD.chain_open)
+  end
+  FHUD.touch_btn_rect, FHUD.touch_btn_visible = btn_rect, btn_visible
+  local _d = love.draw
+  love.draw = function(...)
+    if _d then _d(...) end
+    pcall(function()
+      if not btn_visible() then return end
+      local x, y, w, h = btn_rect()
+      love.graphics.setColor(0, 0, 0, 0.75)
+      love.graphics.rectangle('fill', x, y, w, h, 6, 6)
+      love.graphics.setColor(0.99, 0.64, 0.0, 1)
+      love.graphics.setLineWidth(2)
+      love.graphics.rectangle('line', x, y, w, h, 6, 6)
+      local font = love.graphics.getFont()
+      local label = FHUD.chain_open and "CLOSE" or "NEXT 10"
+      local sc = math.min((w * 0.8) / math.max(font:getWidth(label), 1), (h * 0.5) / math.max(font:getHeight(), 1))
+      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.print(label, x + (w - font:getWidth(label) * sc) / 2, y + (h - font:getHeight() * sc) / 2, 0, sc, sc)
+    end)
+  end
+  local function hit(x, y)
+    local ok, r = pcall(function()
+      if not btn_visible() then return false end
+      local bx, by, bw, bh = btn_rect()
+      local dpi = love.graphics.getDPIScale and love.graphics.getDPIScale() or 1
+      for _, s in ipairs({ 1, dpi }) do
+        local px, py = x / s, y / s
+        if px >= bx and px <= bx + bw and py >= by and py <= by + bh then return true end
+      end
+      return false
+    end)
+    return ok and r
+  end
+  local swallow_release = false
+  local _mp = love.mousepressed
+  love.mousepressed = function(x, y, ...)
+    if hit(x, y) then swallow_release = true; pcall(FHUD_toggle_chain); return end
+    if _mp then return _mp(x, y, ...) end
+  end
+  local _mr = love.mousereleased
+  love.mousereleased = function(...)
+    if swallow_release then swallow_release = false; return end
+    if _mr then return _mr(...) end
+  end
+end
+
+-------------------------------------------------------- Score preview (selected hand)
+do
+-- Scoring core: copied verbatim from the runtime G.FUNCS.evaluate_play (Lovely dump
+-- functions/state_events.lua 617-641 + 664-823: hand info, scoring hand, before, blind
+-- modify_hand, main scoring, jokers, individual areas, final_scoring_step, deck). Every
+-- side effect it reaches (events, sounds, text, unlocks, stats) is stubbed by the caller.
+local function FHUD_score_core()
+    local text,disp_text,poker_hands,scoring_hand,non_loc_disp_text = G.FUNCS.get_poker_hand_info(G.play.cards)
+    
+    G.GAME.hands[text].played = G.GAME.hands[text].played + 1
+    G.GAME.hands[text].played_this_round = G.GAME.hands[text].played_this_round + 1
+    G.GAME.hands[text].played_this_ante = G.GAME.hands[text].played_this_ante + 1
+    G.GAME.last_hand_played = text
+    set_hand_usage(text)
+    G.GAME.hands[text].visible = true
+
+    local final_scoring_hand = {}
+    for i=1, #G.play.cards do
+        local splashed = SMODS.always_scores(G.play.cards[i]) or next(find_joker('Splash'))
+        local unsplashed = SMODS.never_scores(G.play.cards[i])
+        if not splashed then
+            for _, card in pairs(scoring_hand) do
+                if card == G.play.cards[i] then splashed = true end
+            end
+        end
+        local effects = {}
+        SMODS.calculate_context({modify_scoring_hand = true, other_card =  G.play.cards[i], full_hand = G.play.cards, scoring_hand = scoring_hand, in_scoring = true, ignore_other_debuff = true}, effects)
+        local flags = SMODS.trigger_effects(effects, G.play.cards[i])
+        if flags.add_to_hand then splashed = true end
+    	if flags.remove_from_hand then unsplashed = true end
+        if splashed and not unsplashed then table.insert(final_scoring_hand, G.play.cards[i]) end
+    end
+    scoring_hand = final_scoring_hand
+    percent = 0.3
+    percent_delta = 0.08
+    if G.GAME.blind:debuff_hand(G.play.cards, poker_hands, text) then return { debuffed = true, text = text, disp = disp_text } end
+        mult = mod_mult(G.GAME.hands[text].mult)
+        hand_chips = mod_chips(G.GAME.hands[text].chips)
+
+        check_for_unlock({type = 'hand', handname = text, disp_text = non_loc_disp_text, scoring_hand = scoring_hand, full_hand = G.play.cards})
+
+        delay(0.4)
+
+        if G.GAME.first_used_hand_level and G.GAME.first_used_hand_level > 0 then
+            level_up_hand(G.deck.cards[1], text, nil, G.GAME.first_used_hand_level)
+            G.GAME.first_used_hand_level = nil
+        end
+
+        local hand_text_set = false
+        -- context.before calculations
+        if SMODS.last_hand then
+            for _, v in ipairs({'scoring_hand', 'full_hand'}) do
+                for _, _c in ipairs(SMODS.last_hand[v]) do
+                    _c.ability['SMODS_'..v] = nil
+                end
+            end
+        end
+        SMODS.last_hand = {scoring_hand = scoring_hand, scoring_name = text, full_hand = G.play.cards}
+        SMODS.calculate_context({full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands, before = true})
+        
+        -- TARGET: effects before scoring starts
+        
+        SMODS.displayed_hand = nil
+
+        mult = mod_mult(G.GAME.hands[text].mult)
+        hand_chips = mod_chips(G.GAME.hands[text].chips)
+
+        local modded = false
+
+        mult, hand_chips, modded = G.GAME.blind:modify_hand(G.play.cards, poker_hands, text, mult, hand_chips, scoring_hand)
+        mult, hand_chips = mod_mult(mult), mod_chips(hand_chips)
+        if modded then update_hand_text({sound = 'chips2', modded = modded}, {chips = hand_chips, mult = mult}) end
+        SMODS.calculate_context({initial_scoring_step = true, full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands})
+        for _, v in ipairs(SMODS.get_card_areas('playing_cards')) do
+            SMODS.calculate_main_scoring({cardarea = v, full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands}, v == G.play and scoring_hand or nil)
+        end
+        delay(0.3)
+        --+++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+        --Joker Effects
+        --+++++++++++++++++++++++++++++++++++++++++++++++++++++++++--
+        percent = percent + percent_delta
+        for _, area in ipairs(SMODS.get_card_areas('jokers')) do for _, _card in ipairs(area.cards) do
+            local effects = {}
+            -- remove base game joker edition calc
+            local eval = eval_card(_card, {cardarea = G.jokers, full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands, edition = true, pre_joker = true})
+            if eval.edition then effects[#effects+1] = eval end
+            
+
+            -- Calculate context.joker_main
+            local joker_eval, post = eval_card(_card, {cardarea = G.jokers, full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands, joker_main = true})
+            if next(joker_eval) then
+                if joker_eval.edition then joker_eval.edition = {} end
+                table.insert(effects, joker_eval)
+                for _, v in ipairs(post) do effects[#effects+1] = v end
+                if joker_eval.retriggers then
+                    for rt = 1, #joker_eval.retriggers do
+                        local rt_eval, rt_post = eval_card(_card, {cardarea = G.jokers, full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands, joker_main = true, retrigger_joker = true})
+                        if next(rt_eval) then
+                            table.insert(effects, {retriggers = joker_eval.retriggers[rt]})
+                            table.insert(effects, rt_eval)
+                            for _, v in ipairs(rt_post) do effects[#effects+1] = v end
+                        end
+                    end
+                end
+            end
+
+            -- Calculate context.other_joker effects
+            for _, _area in ipairs(SMODS.get_card_areas('jokers')) do
+                for _, _joker in ipairs(_area.cards) do
+                    local other_key = 'other_unknown'
+                    if _card.ability.set == 'Joker' then other_key = 'other_joker' end
+                    if _card.ability.consumeable then other_key = 'other_consumeable' end
+                    if _card.ability.set == 'Voucher' then other_key = 'other_voucher' end
+                    -- TARGET: add context.other_something identifier to your cards
+                    local joker_eval,post = eval_card(_joker, {full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands, [other_key] = _card, other_main = _card })
+                    if next(joker_eval) then
+                        if joker_eval.edition then joker_eval.edition = {} end
+                        joker_eval.jokers.juice_card = _joker
+                        table.insert(effects, joker_eval)
+                        for _, v in ipairs(post) do effects[#effects+1] = v end
+                        if joker_eval.retriggers then
+                            for rt = 1, #joker_eval.retriggers do
+                                local rt_eval, rt_post = eval_card(_joker, {full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands, [other_key] = _card, retrigger_joker = true})
+                                if next(rt_eval) then
+                                    table.insert(effects, {retriggers = joker_eval.retriggers[rt]})
+                                    table.insert(effects, rt_eval)
+                                    for _, v in ipairs(rt_post) do effects[#effects+1] = v end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            for _, _area in ipairs(SMODS.get_card_areas('individual')) do
+                local other_key = 'other_unknown'
+                if _card.ability.set == 'Joker' then other_key = 'other_joker' end
+                if _card.ability.consumeable then other_key = 'other_consumeable' end
+                if _card.ability.set == 'Voucher' then other_key = 'other_voucher' end
+                -- TARGET: add context.other_something identifier to your cards
+                local _eval,post = SMODS.eval_individual(_area, {full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands, [other_key] = _card, other_main = _card })
+                if next(_eval) then
+                    _eval.individual.juice_card = _area.scored_card
+                    table.insert(effects, _eval)
+                    for _, v in ipairs(post) do effects[#effects+1] = v end
+                    if _eval.retriggers then
+                        for rt = 1, #_eval.retriggers do
+                            local rt_eval, rt_post = SMODS.eval_individual(_area, {full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands, [other_key] = _card, retrigger_joker = true})
+                            if next(rt_eval) then
+                                table.insert(effects, {_eval.retriggers[rt]})
+                                table.insert(effects, rt_eval)
+                                for _, v in ipairs(rt_post) do effects[#effects+1] = v end
+                            end
+                        end
+                    end
+                end
+            end
+
+            -- calculate edition multipliers
+            local eval = eval_card(_card, {cardarea = G.jokers, full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands, edition = true, post_joker = true})
+            if eval.edition then effects[#effects+1] = eval end
+
+            SMODS.trigger_effects(effects, _card)
+        end end
+
+        --- context.main_scoring for individual area calculations
+        for _, _area in ipairs(SMODS.get_card_areas('individual')) do
+            local effects = {}
+            -- Calculate context.main_scoring for individual areas
+            local _eval, post = SMODS.eval_individual(_area, { full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands, main_scoring = true })
+            if next(_eval) then
+                table.insert(effects, _eval)
+                _eval.individual.juice_card = _area.scored_card
+                for _, v in ipairs(post) do effects[#effects + 1] = v end
+                if _eval.retriggers then
+                    for rt = 1, #_eval.retriggers do
+                        local rt_eval, rt_post = SMODS.eval_individual(_area, {full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands, main_scoring = true, retrigger_joker = true})
+                        if next(rt_eval) then
+                            table.insert(effects, {_eval.retriggers[rt]})
+                            table.insert(effects, rt_eval)
+                            for _, v in ipairs(rt_post) do effects[#effects+1] = v end
+                        end
+                    end
+                end
+            end
+        
+            SMODS.trigger_effects(effects, _area.scored_card)
+        end
+        
+        
+        -- context.final_scoring_step calculations
+        SMODS.calculate_context({full_hand = G.play.cards, scoring_hand = scoring_hand, scoring_name = text, poker_hands = poker_hands, final_scoring_step = true})
+        
+        -- TARGET: effects before deck final_scoring_step
+        local nu_chip, nu_mult = G.GAME.selected_back:trigger_effect{context = 'final_scoring_step', chips = hand_chips, mult = mult}
+        mult = mod_mult(nu_mult or mult)
+        hand_chips = mod_chips(nu_chip or hand_chips)
+    return { text = text, disp = disp_text }
+end
+
+-- Plain tables are copied deeply, objects (anything with a metatable: cards, areas,
+-- blinds, UI) are kept by reference. sp_restore writes a copy back IN PLACE, so tables the
+-- UI holds references to (G.GAME.hands[...] etc.) stay the same tables.
+local function sp_copy(v, seen)
+  if type(v) ~= 'table' or getmetatable(v) then return v end
+  seen = seen or {}
+  if seen[v] then return seen[v] end
+  local t = {}
+  seen[v] = t
+  for k, x in pairs(v) do t[k] = sp_copy(x, seen) end
+  return t
+end
+local function sp_restore(dst, src, seen)
+  seen = seen or {}
+  if seen[dst] then return end
+  seen[dst] = true
+  for k in pairs(dst) do if src[k] == nil then dst[k] = nil end end
+  for k, v in pairs(src) do
+    local d = dst[k]
+    if type(v) == 'table' and not getmetatable(v) and type(d) == 'table' and not getmetatable(d) and d ~= v then
+      sp_restore(d, v, seen)
+    else
+      dst[k] = v
+    end
+  end
+end
+
+local CARD_FIELDS = { 'seal', 'debuff', 'vampired', 'lucky_trigger', 'glass_trigger', 'shattered', 'destroyed',
+  'getting_sliced', 'sell_cost', 'cost', 'highlighted', 'area' }
+local GLOBALS = { 'hand_chips', 'mult', 'percent', 'percent_delta' }
+local STUBS = { 'play_sound', 'card_eval_status_text', 'update_hand_text', 'delay', 'highlight_card',
+  'check_for_unlock', 'inc_career_stat', 'set_hand_usage', 'check_and_set_high_score', 'attention_text',
+  'play_area_status_text', 'juice_card', 'juice_card_until', 'discover_card', 'notify_alert' }
+
+-- Score the cards in `sel` as if played now: snapshot -> game's scoring core -> restore.
+-- Returns { text, disp, score, chips, mult, debuffed } or nil, err.
+function FHUD_simulate_play(sel)
+  if not (G and G.GAME and G.play and G.hand and G.jokers and SMODS and SMODS.calculate_round_score) then return nil, "not ready" end
+  local areas = {}
+  for _, a in ipairs({ G.jokers, G.hand, G.consumeables, G.deck, G.discard, G.play }) do if a then areas[#areas + 1] = a end end
+  -- ---- snapshot
+  local snap = { game = sp_copy(G.GAME), cards = {}, areas = {}, glob = {}, params = {}, blind = {}, smods = {} }
+  local pre_cards = {}
+  for _, c in pairs(G.I.CARD) do
+    pre_cards[c] = true
+    local s = { ability = sp_copy(c.ability), base = sp_copy(c.base), edition = sp_copy(c.edition),
+      center = c.config and c.config.center, center_key = c.config and c.config.center_key, f = {} }
+    for _, k in ipairs(CARD_FIELDS) do s.f[k] = c[k] end
+    snap.cards[c] = s
+  end
+  for _, a in ipairs(areas) do
+    local cs, hs = {}, {}
+    for i, c in ipairs(a.cards) do cs[i] = c end
+    for i, c in ipairs(a.highlighted or {}) do hs[i] = c end
+    snap.areas[a] = { cards = cs, highlighted = hs, config = sp_copy(a.config) }
+  end
+  local pcs = {}
+  for i, c in ipairs(G.playing_cards or {}) do pcs[i] = c end
+  for _, k in ipairs(GLOBALS) do snap.glob[k] = rawget(_G, k) end
+  snap.playing_card = G.playing_card
+  for k, p in pairs(SMODS.Scoring_Parameters or {}) do snap.params[k] = sp_copy(p.current) end
+  for k, v in pairs(G.GAME.blind or {}) do
+    if k ~= 'children' and (type(v) ~= 'table' or not getmetatable(v)) and type(v) ~= 'function' then snap.blind[k] = sp_copy(v) end
+  end
+  for _, k in ipairs({ 'last_hand', 'displayed_hand', 'displaying_scoring', 'hand_debuff_source' }) do snap.smods[k] = SMODS[k] end
+  -- ---- mute every side effect
+  local saved = {}
+  for _, n in ipairs(STUBS) do saved[n] = rawget(_G, n); if saved[n] then _G[n] = function() end end end
+  local em = G.E_MANAGER
+  local own_ev = em and rawget(em, 'add_event')
+  if em then em.add_event = function() end end
+  local juice_saved = {}
+  for _, cls in ipairs({ Card, Moveable, Blind, CardArea }) do
+    if cls and rawget(cls, 'juice_up') then juice_saved[cls] = rawget(cls, 'juice_up'); cls.juice_up = function() end end
+  end
+  local smods_juice = SMODS.juice_up_blind
+  SMODS.juice_up_blind = function() end
+  local locks = G.CONTROLLER and G.CONTROLLER.locks
+  local saved_locks = {}
+  if locks then for k, v in pairs(locks) do saved_locks[k] = v end end
+  local paused = G.SETTINGS.paused
+  -- ---- set up the play exactly as play_cards_from_highlighted leaves it for evaluate_play
+  local ok, res = pcall(function()
+    local inplay = {}
+    for _, c in ipairs(sel) do inplay[c] = true end
+    local played, rest = {}, {}
+    for _, c in ipairs(sel) do played[#played + 1] = c end
+    table.sort(played, function(a, b) return a.T.x < b.T.x end)
+    for _, c in ipairs(G.hand.cards) do if not inplay[c] then rest[#rest + 1] = c end end
+    G.play.cards = played
+    G.hand.cards = rest
+    G.hand.highlighted = {}
+    for _, c in ipairs(played) do c.area = G.play; c.highlighted = false; c.base.times_played = (c.base.times_played or 0) + 1 end
+    G.GAME.blind.triggered = false
+    G.GAME.current_round.hands_left = G.GAME.current_round.hands_left - 1
+    local r = FHUD_score_core()
+    r.chips, r.mult = hand_chips, mult
+    -- evaluate_play adds math.floor(SMODS.calculate_round_score()) to the round (state_events.lua 884)
+    r.score = r.debuffed and 0 or math.floor(SMODS.calculate_round_score())
+    return r
+  end)
+  -- ---- restore (always)
+  pcall(function()
+    local stray = {}
+    for _, c in pairs(G.I.CARD) do if not pre_cards[c] then stray[#stray + 1] = c end end
+    for _, c in ipairs(stray) do pcall(c.remove, c) end
+  end)
+  for _, a in ipairs(areas) do
+    local s = snap.areas[a]
+    for i = #a.cards, 1, -1 do a.cards[i] = nil end
+    for i, c in ipairs(s.cards) do a.cards[i] = c end
+    a.highlighted = a.highlighted or {}
+    for i = #a.highlighted, 1, -1 do a.highlighted[i] = nil end
+    for i, c in ipairs(s.highlighted) do a.highlighted[i] = c end
+    if type(a.config) == 'table' then sp_restore(a.config, s.config) end
+  end
+  if G.playing_cards then
+    for i = #G.playing_cards, 1, -1 do G.playing_cards[i] = nil end
+    for i, c in ipairs(pcs) do G.playing_cards[i] = c end
+  end
+  for c, s in pairs(snap.cards) do
+    if type(c.ability) == 'table' and type(s.ability) == 'table' then sp_restore(c.ability, s.ability) else c.ability = s.ability end
+    if type(c.base) == 'table' and type(s.base) == 'table' then sp_restore(c.base, s.base) else c.base = s.base end
+    c.edition = s.edition
+    for _, k in ipairs(CARD_FIELDS) do c[k] = s.f[k] end
+    if c.config and c.config.center ~= s.center then
+      c.config.center = s.center
+      c.config.center_key = s.center_key
+      if c.set_sprites then pcall(c.set_sprites, c, s.center) end
+    end
+  end
+  sp_restore(G.GAME, snap.game)
+  for k, v in pairs(snap.blind) do
+    local cur = G.GAME.blind[k]
+    if type(v) == 'table' and type(cur) == 'table' and not getmetatable(cur) and cur ~= v then sp_restore(cur, v) else G.GAME.blind[k] = v end
+  end
+  for _, k in ipairs(GLOBALS) do rawset(_G, k, snap.glob[k]) end
+  G.playing_card = snap.playing_card
+  for k, p in pairs(SMODS.Scoring_Parameters or {}) do p.current = snap.params[k] end
+  for k, v in pairs(snap.smods) do SMODS[k] = v end
+  for n, f in pairs(saved) do _G[n] = f end
+  for cls, f in pairs(juice_saved) do cls.juice_up = f end
+  SMODS.juice_up_blind = smods_juice
+  if em then em.add_event = own_ev end
+  if locks then
+    for k in pairs(locks) do if saved_locks[k] == nil then locks[k] = nil end end
+    for k, v in pairs(saved_locks) do locks[k] = v end
+  end
+  G.SETTINGS.paused = paused
+  if not ok then return nil, res end
+  return res
+end
+
+-- Recomputed only when what you selected (or anything that changes scoring) changes.
+local function score_sig()
+  local t = { tostring(G.GAME.current_round.hands_left), tostring(G.GAME.chips), tostring(G.GAME.dollars),
+    tostring(G.GAME.blind and G.GAME.blind.config and G.GAME.blind.config.blind and G.GAME.blind.config.blind.key) }
+  for _, c in ipairs(G.hand.highlighted) do t[#t + 1] = tostring(c.sort_id or c) .. "@" .. string.format("%.1f", c.T.x) end
+  for _, j in ipairs(G.jokers.cards) do t[#t + 1] = tostring(j.sort_id or j) end
+  for _, c in ipairs(G.hand.cards) do t[#t + 1] = tostring(c.sort_id or c) end
+  return table.concat(t, "|")
+end
+
+-- DVPreview (a score-preview mod many PC players run) already shows this; don't double up.
+local function other_score_preview()
+  if rawget(_G, 'DV') and DV.PRE then return true end -- DVPreview loads through Lovely alone
+  for id, m in pairs((SMODS and SMODS.Mods) or {}) do
+    if m.can_load and not m.disabled and (id == 'DVPreview' or tostring(id):lower():find('preview', 1, true) and id ~= 'ForesightHUD') then return true end
+  end
+  return false
+end
+
+function FHUD_score_tick()
+  if FHUD.other_score_preview == nil then FHUD.other_score_preview = other_score_preview() end
+  if not (cfg('score_preview') and not FHUD.other_score_preview and G and G.STATE == G.STATES.SELECTING_HAND and G.hand and G.hand.highlighted
+      and #G.hand.highlighted > 0 and predict_ok()) then
+    FHUD.score = nil; FHUD.score_sig = nil
+    return
+  end
+  if G.CONTROLLER and G.CONTROLLER.locked then return end
+  local sig = score_sig()
+  if sig == FHUD.score_sig then return end
+  FHUD.score_sig = sig
+  local r, err = FHUD_simulate_play(G.hand.highlighted)
+  if not r then
+    FHUD.score = nil
+    if not FHUD.score_err_logged then FHUD.score_err_logged = true; print("[ForesightHUD] score preview failed: " .. tostring(err)) end
+    return
+  end
+  local need = (G.GAME.blind and G.GAME.blind.chips or 0) - (G.GAME.chips or 0)
+  r.need = need
+  r.unsure = (G.GAME.blind and G.GAME.blind.config and G.GAME.blind.config.blind and G.GAME.blind.config.blind.key == 'bl_hook') or any_modded_joker()
+  FHUD.score = r
+end
+
+local function fmt_num(n)
+  n = math.floor((tonumber(n) or 0) + 0.5)
+  if n >= 1e11 then return string.format("%.3e", n) end
+  local s = tostring(n)
+  local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+  return (out:gsub("^,", ""))
+end
+FHUD_fmt_num = fmt_num
+
+-- Drawn above the hand: "SCORE 1,240" and "WINS" / "NEED 300 MORE".
+do
+  local _d3 = love.draw
+  love.draw = function(...)
+    if _d3 then _d3(...) end
+    pcall(function()
+      local r = FHUD.score
+      if not r or not G.hand or G.STATE ~= G.STATES.SELECTING_HAND or G.OVERLAY_MENU then return end
+      -- a hovered consumable / generator / badge preview sits in the same spot above the hand
+      if FHUD.conarea or FHUD.genarea or FHUD.bh_area then return end
+      local u = G.TILESCALE * G.TILESIZE
+      local W, H = love.graphics.getDimensions()
+      local cx = (G.hand.T.x + G.hand.T.w / 2 + G.ROOM.T.x) * u
+      local top = (G.hand.T.y + G.ROOM.T.y) * u
+      local line1 = r.debuffed and "NOT ALLOWED" or ((r.unsure and "~" or "") .. "SCORE " .. fmt_num(r.score))
+      local wins = (not r.debuffed) and r.score >= r.need
+      local line2 = r.debuffed and "" or (wins and "WINS" or ("NEED " .. fmt_num(r.need - r.score) .. " MORE"))
+      local font = love.graphics.getFont()
+      local sc = (H * 0.034) / math.max(font:getHeight(), 1)
+      local fh = font:getHeight() * sc
+      local w = math.max(font:getWidth(line1), font:getWidth(line2)) * sc
+      local pad = fh * 0.4
+      local bw, bh = w + pad * 2, fh * (line2 ~= "" and 2 or 1) + pad * 2
+      -- clear of the selected cards, which rise above the hand row
+      local x, y = cx - bw / 2, top - bh - (0.45 * G.CARD_H) * u
+      love.graphics.setColor(0, 0, 0, 0.78)
+      love.graphics.rectangle('fill', x, y, bw, bh, 6, 6)
+      if r.debuffed then love.graphics.setColor(0.6, 0.6, 0.6, 1) elseif wins then love.graphics.setColor(0.25, 0.85, 0.35, 1) else love.graphics.setColor(0.99, 0.64, 0.0, 1) end
+      love.graphics.setLineWidth(2)
+      love.graphics.rectangle('line', x, y, bw, bh, 6, 6)
+      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.print(line1, cx - font:getWidth(line1) * sc / 2, y + pad, 0, sc, sc)
+      if line2 ~= "" then
+        if wins then love.graphics.setColor(0.45, 1, 0.55, 1) else love.graphics.setColor(1, 0.75, 0.35, 1) end
+        love.graphics.print(line2, cx - font:getWidth(line2) * sc / 2, y + pad + fh, 0, sc, sc)
+      end
+      love.graphics.setColor(1, 1, 1, 1)
+    end)
+  end
+end
+
 end
 
 -------------------------------------------------------- Steamodded config tab
@@ -5129,6 +5814,7 @@ if MOD then
       tog("Lucky card", 'lucky'),
       tog("Purple seal", 'purple_seal'),
       tog("Blue seal", 'blue_seal'),
+      tog("Score preview", 'score_preview'),
     })
     local blindsel = col({
       header("Blind select"),
